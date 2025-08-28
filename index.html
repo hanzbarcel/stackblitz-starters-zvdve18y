@@ -1,0 +1,206 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>n8n Resume Parser</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <style>
+        @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;600;700&display=swap');
+        body {
+            font-family: 'Inter', sans-serif;
+        }
+        .spinner {
+            border-top-color: #6366f1;
+            -webkit-animation: spinner-animation 1s ease-in-out infinite;
+            animation: spinner-animation 1s ease-in-out infinite;
+        }
+        @-webkit-keyframes spinner-animation {
+            0% { -webkit-transform: rotate(0deg); }
+            100% { -webkit-transform: rotate(360deg); }
+        }
+        @keyframes spinner-animation {
+            0% { transform: rotate(0deg); }
+            100% { transform: rotate(360deg); }
+        }
+        .message-success {
+            background-color: #15803d; /* Tailwind green-700 */
+        }
+        .message-error {
+            background-color: #b91c1c; /* Tailwind red-700 */
+        }
+    </style>
+</head>
+<body class="bg-gray-900 text-white flex items-center justify-center min-h-screen p-4">
+    <div class="max-w-xl w-full bg-gray-800 rounded-2xl p-8 shadow-2xl space-y-6">
+        <h1 class="text-3xl font-bold text-center">Resume Parser with n8n</h1>
+        <p class="text-gray-400 text-center">
+            Upload a resume file to send it to your n8n workflow for parsing.
+        </p>
+        
+        <form id="uploadForm" class="space-y-4">
+            <label class="block">
+                <span class="sr-only">Choose a file</span>
+                <input type="file" id="resumeFile" name="file" accept=".txt,.pdf,.docx" class="block w-full text-sm text-gray-500
+                    file:mr-4 file:py-2 file:px-4
+                    file:rounded-full file:border-0
+                    file:text-sm file:font-semibold
+                    file:bg-blue-50 file:text-blue-700
+                    hover:file:bg-blue-100 cursor-pointer" />
+            </label>
+            <button type="submit" id="submitButton" class="w-full py-3 px-6 bg-blue-600 hover:bg-blue-700 rounded-lg text-white font-bold transition-colors duration-200" disabled>
+                Parse Resume
+            </button>
+        </form>
+
+        <div id="loadingIndicator" class="hidden flex justify-center items-center space-x-2 py-4">
+            <div class="spinner w-6 h-6 border-4 rounded-full border-gray-600"></div>
+            <span class="text-gray-400">Processing with n8n...</span>
+        </div>
+
+        <div id="resultContainer" class="hidden mt-6 bg-gray-700 rounded-xl overflow-hidden">
+            <h2 class="text-xl font-semibold px-6 py-4 border-b border-gray-600">Parsed Data:</h2>
+            <pre id="resultDisplay" class="p-6 text-sm overflow-x-auto"></pre>
+        </div>
+
+        <div id="messageContainer" class="mt-4 p-4 rounded-lg hidden">
+            <p id="messageText"></p>
+        </div>
+    </div>
+    
+    <!-- Google API Client Library -->
+    <script src="https://apis.google.com/js/api.js"></script>
+    <script>
+        document.addEventListener('DOMContentLoaded', () => {
+            const uploadForm = document.getElementById('uploadForm');
+            const resumeFile = document.getElementById('resumeFile');
+            const submitButton = document.getElementById('submitButton');
+            const loadingIndicator = document.getElementById('loadingIndicator');
+            const resultContainer = document.getElementById('resultContainer');
+            const resultDisplay = document.getElementById('resultDisplay');
+            const messageContainer = document.getElementById('messageContainer');
+            const messageText = document.getElementById('messageText');
+
+            // IMPORTANT: Get this from your Google Cloud Console
+            const CLIENT_ID = '281520129486-mjalqrjph5isalgkdt91g4boujgef0gu.apps.googleusercontent.com';
+            const DISCOVERY_DOCS = ["https://www.googleapis.com/discovery/v1/apis/drive/v3/rest"];
+            const SCOPES = 'https://www.googleapis.com/auth/drive.file';
+
+            // IMPORTANT: This is the URL for your n8n webhook.
+            const N8N_WEBHOOK_URL = "https://edgenicolas.app.n8n.cloud/webhook/63a1066f-c58d-4215-a59b-6b5f1ab74974";
+
+            function showMessage(message, type) {
+                messageContainer.classList.remove('hidden', 'message-success', 'message-error');
+                if (type === 'success') {
+                    messageContainer.classList.add('message-success');
+                } else if (type === 'error') {
+                    messageContainer.classList.add('message-error');
+                }
+                messageText.textContent = message;
+            }
+
+            // Function to handle Google Sign-in and API client initialization
+            function handleClientLoad() {
+                gapi.load('client:auth2', () => {
+                    gapi.client.init({
+                        clientId: CLIENT_ID,
+                        discoveryDocs: DISCOVERY_DOCS,
+                        scope: SCOPES
+                    }).then(() => {
+                        gapi.auth2.getAuthInstance().isSignedIn.listen(updateSignInStatus);
+                        updateSignInStatus(gapi.auth2.getAuthInstance().isSignedIn.get());
+                    }).catch(error => {
+                        console.error('Error loading Google API client:', error);
+                        showMessage(`Error loading Google API. Make sure your CLIENT_ID is correct.`, 'error');
+                    });
+                });
+            }
+
+            function updateSignInStatus(isSignedIn) {
+                if (isSignedIn) {
+                    submitButton.disabled = false;
+                    showMessage('Signed in with Google. You can now upload files.', 'success');
+                } else {
+                    submitButton.disabled = true;
+                    // Automatically prompt for sign-in on page load
+                    gapi.auth2.getAuthInstance().signIn();
+                }
+            }
+
+            // Call this function when the script loads
+            handleClientLoad();
+
+            // --- Main Form Submission Logic ---
+            uploadForm.addEventListener('submit', async (e) => {
+                e.preventDefault();
+
+                const file = resumeFile.files[0];
+                if (!file) {
+                    showMessage('Please select a file to upload.', 'error');
+                    return;
+                }
+
+                resultContainer.classList.add('hidden');
+                messageContainer.classList.add('hidden');
+                loadingIndicator.classList.remove('hidden');
+                submitButton.disabled = true;
+
+                try {
+                    // Step 1: Upload the file to Google Drive and get the file ID
+                    const form = new FormData();
+                    form.append('metadata', new Blob([JSON.stringify({ name: file.name })], { type: 'application/json' }));
+                    form.append('file', file);
+
+                    const uploadResponse = await fetch('https://www.googleapis.com/upload/drive/v3/files?uploadType=multipart', {
+                        method: 'POST',
+                        headers: {
+                            'Authorization': `Bearer ${gapi.client.getToken().access_token}`
+                        },
+                        body: form
+                    });
+
+                    if (!uploadResponse.ok) {
+                        throw new Error(`Google Drive API error! status: ${uploadResponse.status}`);
+                    }
+
+                    const uploadResult = await uploadResponse.json();
+                    const fileId = uploadResult.id;
+
+                    console.log('File uploaded to Google Drive with ID:', fileId);
+
+                    if (!fileId) {
+                        throw new Error('Failed to get a valid file ID from Google Drive.');
+                    }
+
+                    // Step 2: Send the file ID to the n8n webhook
+                    const webhookResponse = await fetch(N8N_WEBHOOK_URL, {
+                        method: 'POST',
+                        headers: {
+                            'Content-Type': 'application/json'
+                        },
+                        body: JSON.stringify({ fileId: fileId })
+                    });
+
+                    if (!webhookResponse.ok) {
+                        const errorText = await webhookResponse.text();
+                        throw new Error(`n8n Webhook error! status: ${webhookResponse.status}, message: ${errorText}`);
+                    }
+
+                    const result = await webhookResponse.json();
+                    
+                    showMessage('Resume successfully parsed!', 'success');
+                    resultContainer.classList.remove('hidden');
+                    resultDisplay.textContent = JSON.stringify(result, null, 2);
+
+                } catch (err) {
+                    console.error('Fetch error:', err);
+                    showMessage(`Failed to process the request: ${err.message}. Check your n8n workflow.`, 'error');
+                } finally {
+                    loadingIndicator.classList.add('hidden');
+                    submitButton.disabled = false;
+                }
+            });
+        });
+    </script>
+</body>
+</html>
